@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-05-12
+
+- Improved Turnstile clicking by bringing the page to the foreground before mouse actions and using stepped mouse movement.
+- Reduced auto-solver polling latency and async fallback scan time.
+- Made `cf-turnstile-response` a secondary signal instead of requiring it for active Turnstile detection.
+- Allowed `is_turnstile_solved` to use `cf_clearance` cookie data when response fields are not present.
+
 ## 0.4.0 - 2026-05-12
 
 - Added `has_turnstile` to detect whether a page currently contains Turnstile candidates.

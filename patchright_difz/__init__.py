@@ -5,7 +5,7 @@ from .headless import get_headless_user_agent
 from .main_world import install_main_world_evaluate_defaults
 from .sync_api import sync_playwright
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 install_main_world_evaluate_defaults()
 

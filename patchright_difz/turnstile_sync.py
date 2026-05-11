@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import weakref
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from patchright.async_api import _generated as async_generated
@@ -21,12 +22,21 @@ from ._turnstile_options import (
     DEFAULT_TURNSTILE_SELECTORS,
     FALLBACK_LIMIT,
     FALLBACK_SELECTORS,
+    OPTIONAL_TURNSTILE_RESPONSE_SELECTORS,
     TurnstileOption,
     normalize_options,
 )
 from .turnstile_async import check_turnstile as _async_check_turnstile
 
 _attached_pages: weakref.WeakSet[Page] = weakref.WeakSet()
+
+
+@dataclass(frozen=True)
+class ClickBehaviorOptions:
+    foreground: bool = True
+    click_delay_ms: int = 35
+    mouse_move_steps: int = 8
+    wait_after_click_ms: int = 150
 
 
 def _box_value(box: Any, key: str) -> float:
@@ -50,13 +60,48 @@ def _get_click_point(box: Any) -> tuple[float, float]:
     return x + x_offset, y + height / 2
 
 
-def _click_box(page: Page, box: Any) -> bool:
+def _prepare_page_for_click(page: Page, options: ClickBehaviorOptions) -> None:
+    if not options.foreground:
+        return
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
+    try:
+        page.evaluate(
+            "() => { window.focus(); document.body?.focus?.(); }",
+            isolated_context=False,
+        )
+    except Exception:
+        pass
+
+
+def _click_box(page: Page, box: Any, options: ClickBehaviorOptions) -> bool:
     _x, _y, width, height = _box_tuple(box)
     if width <= 0 or height <= 0:
         return False
 
     x, y = _get_click_point(box)
-    page.mouse.click(x, y)
+    _prepare_page_for_click(page, options)
+    page.mouse.move(x, y, steps=options.mouse_move_steps)
+    page.mouse.down()
+
+    if options.click_delay_ms > 0:
+        try:
+            page.wait_for_timeout(options.click_delay_ms)
+        except Exception:
+            time.sleep(options.click_delay_ms / 1000)
+
+    page.mouse.up()
+
+    if options.wait_after_click_ms > 0:
+        try:
+            page.wait_for_timeout(options.wait_after_click_ms)
+        except Exception:
+            time.sleep(options.wait_after_click_ms / 1000)
+
     return True
 
 
@@ -65,7 +110,15 @@ def _looks_like_turnstile_box(box: Any) -> bool:
     return 260 <= width <= 340 and 35 <= height <= 90
 
 
-def _click_locator_box(page: Page, locator: Locator) -> bool:
+def _is_optional_response_selector(selector: str) -> bool:
+    return selector in OPTIONAL_TURNSTILE_RESPONSE_SELECTORS
+
+
+def _click_locator_box(
+    page: Page,
+    locator: Locator,
+    options: ClickBehaviorOptions,
+) -> bool:
     try:
         box = locator.bounding_box(timeout=1000)
     except Exception:
@@ -74,10 +127,35 @@ def _click_locator_box(page: Page, locator: Locator) -> bool:
     if not box:
         return False
 
-    return _click_box(page, box)
+    x, y = _get_click_point(box)
+    box_x, box_y, _width, _height = _box_tuple(box)
+    _prepare_page_for_click(page, options)
+
+    try:
+        locator.click(
+            force=True,
+            timeout=1000,
+            delay=options.click_delay_ms,
+            steps=options.mouse_move_steps,
+            position={
+                "x": max(1, x - box_x),
+                "y": max(1, y - box_y),
+            },
+        )
+
+        if options.wait_after_click_ms > 0:
+            page.wait_for_timeout(options.wait_after_click_ms)
+
+        return True
+    except Exception:
+        return _click_box(page, box, options)
 
 
-def _click_element_or_parent_box(page: Page, element: ElementHandle) -> bool:
+def _click_element_or_parent_box(
+    page: Page,
+    element: ElementHandle,
+    options: ClickBehaviorOptions,
+) -> bool:
     current: ElementHandle | None = element
 
     for _depth in range(8):
@@ -89,7 +167,7 @@ def _click_element_or_parent_box(page: Page, element: ElementHandle) -> bool:
         except Exception:
             box = None
 
-        if box and _looks_like_turnstile_box(box) and _click_box(page, box):
+        if box and _looks_like_turnstile_box(box) and _click_box(page, box, options):
             return True
 
         try:
@@ -117,6 +195,7 @@ def _click_turnstile_locators(
     page: Page,
     selectors: Sequence[str],
     max_candidates_per_selector: int,
+    options: ClickBehaviorOptions,
 ) -> bool:
     for selector in selectors:
         locator = page.locator(selector)
@@ -129,7 +208,7 @@ def _click_turnstile_locators(
         for index in range(min(count, max_candidates_per_selector)):
             target = locator.nth(index)
 
-            if _click_locator_box(page, target):
+            if _click_locator_box(page, target, options):
                 return True
 
             try:
@@ -141,7 +220,7 @@ def _click_turnstile_locators(
                 continue
 
             try:
-                if _click_element_or_parent_box(page, element):
+                if _click_element_or_parent_box(page, element, options):
                     return True
             finally:
                 element.dispose()
@@ -171,7 +250,7 @@ def _has_turnstile_locators(
             if box and _looks_like_turnstile_box(box):
                 return True
 
-        if count > 0:
+        if count > 0 and not _is_optional_response_selector(selector):
             return True
 
     return False
@@ -198,7 +277,10 @@ def _has_turnstile_fallback(page: Page) -> bool:
     return False
 
 
-def _click_turnstile_fallback(page: Page) -> bool:
+def _click_turnstile_fallback(
+    page: Page,
+    options: ClickBehaviorOptions,
+) -> bool:
     candidates: list[Any] = []
 
     for selector in FALLBACK_SELECTORS:
@@ -226,7 +308,7 @@ def _click_turnstile_fallback(page: Page) -> bool:
 
     for box in candidates:
         try:
-            if _click_box(page, box):
+            if _click_box(page, box, options):
                 return True
         except Exception:
             pass
@@ -268,15 +350,22 @@ def has_turnstile(
 
 
 def is_turnstile_solved(
-    page: Page,
+    page: Page | None = None,
     *,
+    context: BrowserContext | None = None,
+    urls: str | Sequence[str] | None = None,
     min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
 ) -> bool:
-    data = _get_cloudflare_page_data(page, min_token_length=min_token_length)
+    data = get_cloudflare_data(
+        page,
+        context=context,
+        urls=urls,
+        min_token_length=min_token_length,
+    )
 
-    return any(
-        len(str(response.get("value", "")).strip()) >= min_token_length
-        for response in data["turnstile"]["responses"]
+    return bool(data["clearance_cookie"]) or any(
+        len(str(token).strip()) >= min_token_length
+        for token in data["turnstile"]["tokens"]
     )
 
 
@@ -285,10 +374,11 @@ def get_cloudflare_data(
     *,
     context: BrowserContext | None = None,
     urls: str | Sequence[str] | None = None,
+    min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
 ) -> CloudflareData:
     context = context or (page.context if page else None)
     page_data = (
-        _get_cloudflare_page_data(page)
+        _get_cloudflare_page_data(page, min_token_length=min_token_length)
         if page
         else empty_cloudflare_page_data()
     )
@@ -315,9 +405,25 @@ def check_turnstile(
     timeout_ms: int = 5000,
     selectors: Sequence[str] | None = None,
     max_candidates_per_selector: int = 5,
+    foreground: bool = True,
+    click_delay_ms: int = 35,
+    mouse_move_steps: int = 8,
+    wait_after_click_ms: int = 150,
 ) -> bool:
     started_at = time.monotonic()
     selector_list = selectors or DEFAULT_TURNSTILE_SELECTORS
+    click_options = ClickBehaviorOptions(
+        foreground=foreground,
+        click_delay_ms=click_delay_ms,
+        mouse_move_steps=mouse_move_steps,
+        wait_after_click_ms=wait_after_click_ms,
+    )
+
+    try:
+        if is_turnstile_solved(page):
+            return True
+    except Exception:
+        pass
 
     while (time.monotonic() - started_at) * 1000 < timeout_ms:
         try:
@@ -325,18 +431,19 @@ def check_turnstile(
                 page,
                 selector_list,
                 max_candidates_per_selector,
+                click_options,
             ):
                 return True
 
-            if _click_turnstile_fallback(page):
+            if _click_turnstile_fallback(page, click_options):
                 return True
         except Exception:
             pass
 
         try:
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(250)
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.25)
 
     return False
 
@@ -373,6 +480,10 @@ def install_turnstile_auto_solver(
                     timeout_ms=options.timeout_ms,
                     selectors=options.selectors,
                     max_candidates_per_selector=options.max_candidates_per_selector,
+                    foreground=options.foreground,
+                    click_delay_ms=options.click_delay_ms,
+                    mouse_move_steps=options.mouse_move_steps,
+                    wait_after_click_ms=options.wait_after_click_ms,
                 )
 
                 if clicked and options.logger:

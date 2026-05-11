@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import weakref
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from patchright.async_api import BrowserContext, ElementHandle, Locator, Page
@@ -20,12 +21,21 @@ from ._turnstile_options import (
     DEFAULT_TURNSTILE_SELECTORS,
     FALLBACK_LIMIT,
     FALLBACK_SELECTORS,
+    OPTIONAL_TURNSTILE_RESPONSE_SELECTORS,
     TurnstileAutoOptions,
     TurnstileOption,
     normalize_options,
 )
 
 _attached_pages: weakref.WeakSet[Page] = weakref.WeakSet()
+
+
+@dataclass(frozen=True)
+class ClickBehaviorOptions:
+    foreground: bool = True
+    click_delay_ms: int = 35
+    mouse_move_steps: int = 8
+    wait_after_click_ms: int = 150
 
 
 def _box_value(box: Any, key: str) -> float:
@@ -49,13 +59,55 @@ def _get_click_point(box: Any) -> tuple[float, float]:
     return x + x_offset, y + height / 2
 
 
-async def _click_box(page: Page, box: Any) -> bool:
+async def _prepare_page_for_click(
+    page: Page,
+    options: ClickBehaviorOptions,
+) -> None:
+    if not options.foreground:
+        return
+
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+
+    try:
+        await page.evaluate(
+            "() => { window.focus(); document.body?.focus?.(); }",
+            isolated_context=False,
+        )
+    except Exception:
+        pass
+
+
+async def _click_box(
+    page: Page,
+    box: Any,
+    options: ClickBehaviorOptions,
+) -> bool:
     _x, _y, width, height = _box_tuple(box)
     if width <= 0 or height <= 0:
         return False
 
     x, y = _get_click_point(box)
-    await page.mouse.click(x, y)
+    await _prepare_page_for_click(page, options)
+    await page.mouse.move(x, y, steps=options.mouse_move_steps)
+    await page.mouse.down()
+
+    if options.click_delay_ms > 0:
+        try:
+            await page.wait_for_timeout(options.click_delay_ms)
+        except Exception:
+            await asyncio.sleep(options.click_delay_ms / 1000)
+
+    await page.mouse.up()
+
+    if options.wait_after_click_ms > 0:
+        try:
+            await page.wait_for_timeout(options.wait_after_click_ms)
+        except Exception:
+            await asyncio.sleep(options.wait_after_click_ms / 1000)
+
     return True
 
 
@@ -64,7 +116,15 @@ def _looks_like_turnstile_box(box: Any) -> bool:
     return 260 <= width <= 340 and 35 <= height <= 90
 
 
-async def _click_locator_box(page: Page, locator: Locator) -> bool:
+def _is_optional_response_selector(selector: str) -> bool:
+    return selector in OPTIONAL_TURNSTILE_RESPONSE_SELECTORS
+
+
+async def _click_locator_box(
+    page: Page,
+    locator: Locator,
+    options: ClickBehaviorOptions,
+) -> bool:
     try:
         box = await locator.bounding_box(timeout=1000)
     except Exception:
@@ -73,12 +133,34 @@ async def _click_locator_box(page: Page, locator: Locator) -> bool:
     if not box:
         return False
 
-    return await _click_box(page, box)
+    x, y = _get_click_point(box)
+    box_x, box_y, _width, _height = _box_tuple(box)
+    await _prepare_page_for_click(page, options)
+
+    try:
+        await locator.click(
+            force=True,
+            timeout=1000,
+            delay=options.click_delay_ms,
+            steps=options.mouse_move_steps,
+            position={
+                "x": max(1, x - box_x),
+                "y": max(1, y - box_y),
+            },
+        )
+
+        if options.wait_after_click_ms > 0:
+            await page.wait_for_timeout(options.wait_after_click_ms)
+
+        return True
+    except Exception:
+        return await _click_box(page, box, options)
 
 
 async def _click_element_or_parent_box(
     page: Page,
     element: ElementHandle,
+    options: ClickBehaviorOptions,
 ) -> bool:
     current: ElementHandle | None = element
 
@@ -91,7 +173,7 @@ async def _click_element_or_parent_box(
         except Exception:
             box = None
 
-        if box and _looks_like_turnstile_box(box) and await _click_box(page, box):
+        if box and _looks_like_turnstile_box(box) and await _click_box(page, box, options):
             return True
 
         try:
@@ -119,6 +201,7 @@ async def _click_turnstile_locators(
     page: Page,
     selectors: Sequence[str],
     max_candidates_per_selector: int,
+    options: ClickBehaviorOptions,
 ) -> bool:
     for selector in selectors:
         locator = page.locator(selector)
@@ -131,7 +214,7 @@ async def _click_turnstile_locators(
         for index in range(min(count, max_candidates_per_selector)):
             target = locator.nth(index)
 
-            if await _click_locator_box(page, target):
+            if await _click_locator_box(page, target, options):
                 return True
 
             try:
@@ -143,7 +226,7 @@ async def _click_turnstile_locators(
                 continue
 
             try:
-                if await _click_element_or_parent_box(page, element):
+                if await _click_element_or_parent_box(page, element, options):
                     return True
             finally:
                 await element.dispose()
@@ -173,7 +256,7 @@ async def _has_turnstile_locators(
             if box and _looks_like_turnstile_box(box):
                 return True
 
-        if count > 0:
+        if count > 0 and not _is_optional_response_selector(selector):
             return True
 
     return False
@@ -188,19 +271,27 @@ async def _has_turnstile_fallback(page: Page) -> bool:
         except Exception:
             count = 0
 
-        for index in range(count):
-            try:
-                box = await locator.nth(index).bounding_box(timeout=250)
-            except Exception:
-                box = None
+        boxes = await asyncio.gather(
+            *(
+                locator.nth(index).bounding_box(timeout=250)
+                for index in range(count)
+            ),
+            return_exceptions=True,
+        )
 
-            if box and _looks_like_turnstile_box(box):
-                return True
+        if any(
+            not isinstance(box, Exception) and box and _looks_like_turnstile_box(box)
+            for box in boxes
+        ):
+            return True
 
     return False
 
 
-async def _click_turnstile_fallback(page: Page) -> bool:
+async def _click_turnstile_fallback(
+    page: Page,
+    options: ClickBehaviorOptions,
+) -> bool:
     candidates: list[Any] = []
 
     for selector in FALLBACK_SELECTORS:
@@ -211,13 +302,16 @@ async def _click_turnstile_fallback(page: Page) -> bool:
         except Exception:
             count = 0
 
-        for index in range(count):
-            try:
-                box = await locator.nth(index).bounding_box(timeout=250)
-            except Exception:
-                box = None
+        boxes = await asyncio.gather(
+            *(
+                locator.nth(index).bounding_box(timeout=250)
+                for index in range(count)
+            ),
+            return_exceptions=True,
+        )
 
-            if box and _looks_like_turnstile_box(box):
+        for box in boxes:
+            if not isinstance(box, Exception) and box and _looks_like_turnstile_box(box):
                 candidates.append(box)
 
     def score(box: Any) -> float:
@@ -228,7 +322,7 @@ async def _click_turnstile_fallback(page: Page) -> bool:
 
     for box in candidates:
         try:
-            if await _click_box(page, box):
+            if await _click_box(page, box, options):
                 return True
         except Exception:
             pass
@@ -270,18 +364,22 @@ async def has_turnstile(
 
 
 async def is_turnstile_solved(
-    page: Page,
+    page: Page | None = None,
     *,
+    context: BrowserContext | None = None,
+    urls: str | Sequence[str] | None = None,
     min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
 ) -> bool:
-    data = await _get_cloudflare_page_data(
+    data = await get_cloudflare_data(
         page,
+        context=context,
+        urls=urls,
         min_token_length=min_token_length,
     )
 
-    return any(
-        len(str(response.get("value", "")).strip()) >= min_token_length
-        for response in data["turnstile"]["responses"]
+    return bool(data["clearance_cookie"]) or any(
+        len(str(token).strip()) >= min_token_length
+        for token in data["turnstile"]["tokens"]
     )
 
 
@@ -290,10 +388,11 @@ async def get_cloudflare_data(
     *,
     context: BrowserContext | None = None,
     urls: str | Sequence[str] | None = None,
+    min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
 ) -> CloudflareData:
     context = context or (page.context if page else None)
     page_data = (
-        await _get_cloudflare_page_data(page)
+        await _get_cloudflare_page_data(page, min_token_length=min_token_length)
         if page
         else empty_cloudflare_page_data()
     )
@@ -320,9 +419,25 @@ async def check_turnstile(
     timeout_ms: int = 5000,
     selectors: Sequence[str] | None = None,
     max_candidates_per_selector: int = 5,
+    foreground: bool = True,
+    click_delay_ms: int = 35,
+    mouse_move_steps: int = 8,
+    wait_after_click_ms: int = 150,
 ) -> bool:
     started_at = asyncio.get_running_loop().time()
     selector_list = selectors or DEFAULT_TURNSTILE_SELECTORS
+    click_options = ClickBehaviorOptions(
+        foreground=foreground,
+        click_delay_ms=click_delay_ms,
+        mouse_move_steps=mouse_move_steps,
+        wait_after_click_ms=wait_after_click_ms,
+    )
+
+    try:
+        if await is_turnstile_solved(page):
+            return True
+    except Exception:
+        pass
 
     while (asyncio.get_running_loop().time() - started_at) * 1000 < timeout_ms:
         try:
@@ -330,18 +445,19 @@ async def check_turnstile(
                 page,
                 selector_list,
                 max_candidates_per_selector,
+                click_options,
             ):
                 return True
 
-            if await _click_turnstile_fallback(page):
+            if await _click_turnstile_fallback(page, click_options):
                 return True
         except Exception:
             pass
 
         try:
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(250)
         except Exception:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
 
     return False
 
@@ -381,6 +497,10 @@ def install_turnstile_auto_solver(
                     timeout_ms=options.timeout_ms,
                     selectors=options.selectors,
                     max_candidates_per_selector=options.max_candidates_per_selector,
+                    foreground=options.foreground,
+                    click_delay_ms=options.click_delay_ms,
+                    mouse_move_steps=options.mouse_move_steps,
+                    wait_after_click_ms=options.wait_after_click_ms,
                 )
 
                 if clicked:

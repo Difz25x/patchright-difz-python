@@ -48,6 +48,9 @@ Patchright's isolated world for a specific call, pass `isolated_context=True`.
 
 The Turnstile helper uses Patchright locators for fallback detection, so it can
 also pick up challenge candidates rendered inside closed shadow roots.
+The hidden `cf-turnstile-response` field is only used as optional token/data
+evidence; active challenge detection prefers visible widgets, iframes, and
+clickable candidates.
 
 When `headless=True` is used without a custom `user_agent`, the wrapper sets a
 normal Chrome user agent before the first request. This applies to
@@ -66,14 +69,18 @@ context = p.chromium.launch_persistent_context(
     no_viewport=True,
     turnstile={
         "timeout_ms": 5000,
-        "interval_ms": 2000,
+        "interval_ms": 750,
+        "foreground": True,
+        "click_delay_ms": 35,
+        "mouse_move_steps": 8,
         "logger": print,
     },
 )
 ```
 
 Camel-case option names from the npm package are also accepted:
-`timeoutMs`, `intervalMs`, and `maxCandidatesPerSelector`.
+`timeoutMs`, `intervalMs`, `maxCandidatesPerSelector`, `clickDelayMs`,
+`mouseMoveSteps`, and `waitAfterClickMs`.
 
 ## Manual usage
 
