@@ -92,6 +92,53 @@ with sync_playwright() as p:
     check_turnstile(page)
 ```
 
+## Turnstile and Cloudflare data helpers
+
+```py
+from patchright_difz.sync_api import (
+    get_cloudflare_data,
+    has_turnstile,
+    is_turnstile_solved,
+)
+
+exists = has_turnstile(page)
+solved = is_turnstile_solved(page)
+data = get_cloudflare_data(page)
+
+print({
+    "exists": exists,
+    "solved": solved,
+    "cookies": data["cloudflare_cookies"],
+    "clearance": data["clearance_cookie"],
+    "cleared": data["challenge"]["cleared"],
+    "document_cookie_names": data["document_cookie_names"],
+    "tokens": data["turnstile"]["tokens"],
+    "sitekeys": data["turnstile"]["sitekeys"],
+    "responses": data["turnstile"]["responses"],
+})
+```
+
+Async usage uses the same names with `await`:
+
+```py
+from patchright_difz.async_api import get_cloudflare_data
+
+data = await get_cloudflare_data(page)
+```
+
+`get_cloudflare_data` reads the current browser context cookies plus visible
+page data such as Turnstile response fields, widget `sitekey` values,
+Cloudflare iframe/script URLs, challenge fields, Ray IDs, and
+Cloudflare-related local/session storage keys. Pass `context` and `urls` when
+you only want cookie data for specific URLs:
+
+```py
+data = get_cloudflare_data(
+    context=context,
+    urls=["https://example.com"],
+)
+```
+
 ## Publish
 
 ```bash

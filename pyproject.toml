@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "patchright-difz"
-version = "0.3.0"
+version = "0.4.0"
 description = "Patchright Python wrapper with optional Turnstile auto-click helper."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,9 +26,9 @@ classifiers = [
 dependencies = ["patchright>=1.58.2"]
 
 [project.urls]
-Homepage = "https://github.com/Difz25x/patchright-difz"
-Repository = "https://github.com/Difz25x/patchright-difz"
-Issues = "https://github.com/Difz25x/patchright-difz/issues"
+Homepage = "https://github.com/Difz25x/patchright-difz-python"
+Repository = "https://github.com/Difz25x/patchright-difz-python"
+Issues = "https://github.com/Difz25x/patchright-difz-python/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["patchright_difz"]

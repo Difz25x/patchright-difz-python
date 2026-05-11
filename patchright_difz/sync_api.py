@@ -7,6 +7,7 @@ from patchright.sync_api import *  # noqa: F403
 from patchright.sync_api import Browser, BrowserContext, Page, Playwright
 from patchright.sync_api import sync_playwright as _patchright_sync_playwright
 
+from ._cloudflare_data import CloudflareCookie, CloudflareData
 from ._turnstile_options import TurnstileAutoOptions, TurnstileOption
 from .headless import (
     get_headless_user_agent,
@@ -14,7 +15,13 @@ from .headless import (
     with_headless_user_agent,
 )
 from .main_world import install_main_world_evaluate_defaults
-from .turnstile_sync import check_turnstile, install_turnstile_auto_solver
+from .turnstile_sync import (
+    check_turnstile,
+    get_cloudflare_data,
+    has_turnstile,
+    install_turnstile_auto_solver,
+    is_turnstile_solved,
+)
 
 _MISSING = object()
 
@@ -150,6 +157,8 @@ def sync_playwright() -> PlaywrightContextManager:
 __all__ = sorted(
     set(getattr(_patchright_sync_api, "__all__", []))
     | {
+    "CloudflareCookie",
+    "CloudflareData",
     "BrowserTypeWrapper",
     "BrowserWrapper",
     "PlaywrightContextManager",
@@ -157,9 +166,12 @@ __all__ = sorted(
     "TurnstileAutoOptions",
     "TurnstileOption",
     "check_turnstile",
+    "get_cloudflare_data",
     "get_headless_user_agent",
+    "has_turnstile",
     "install_main_world_evaluate_defaults",
     "install_turnstile_auto_solver",
+    "is_turnstile_solved",
     "sync_playwright",
     }
 )

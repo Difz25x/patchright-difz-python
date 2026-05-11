@@ -7,6 +7,15 @@ from typing import Any, Callable, Sequence
 
 from patchright.async_api import BrowserContext, ElementHandle, Locator, Page
 
+from ._cloudflare_data import (
+    CLOUDFLARE_DATA_SCRIPT,
+    DEFAULT_TOKEN_MIN_LENGTH,
+    CloudflareData,
+    build_cloudflare_data,
+    cloudflare_data_arg,
+    empty_cloudflare_page_data,
+    normalize_cookie_urls,
+)
 from ._turnstile_options import (
     DEFAULT_TURNSTILE_SELECTORS,
     FALLBACK_LIMIT,
@@ -142,6 +151,55 @@ async def _click_turnstile_locators(
     return False
 
 
+async def _has_turnstile_locators(
+    page: Page,
+    selectors: Sequence[str],
+    max_candidates_per_selector: int,
+) -> bool:
+    for selector in selectors:
+        locator = page.locator(selector)
+
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+
+        for index in range(min(count, max_candidates_per_selector)):
+            try:
+                box = await locator.nth(index).bounding_box(timeout=250)
+            except Exception:
+                box = None
+
+            if box and _looks_like_turnstile_box(box):
+                return True
+
+        if count > 0:
+            return True
+
+    return False
+
+
+async def _has_turnstile_fallback(page: Page) -> bool:
+    for selector in FALLBACK_SELECTORS:
+        locator = page.locator(selector)
+
+        try:
+            count = min(await locator.count(), FALLBACK_LIMIT)
+        except Exception:
+            count = 0
+
+        for index in range(count):
+            try:
+                box = await locator.nth(index).bounding_box(timeout=250)
+            except Exception:
+                box = None
+
+            if box and _looks_like_turnstile_box(box):
+                return True
+
+    return False
+
+
 async def _click_turnstile_fallback(page: Page) -> bool:
     candidates: list[Any] = []
 
@@ -176,6 +234,84 @@ async def _click_turnstile_fallback(page: Page) -> bool:
             pass
 
     return False
+
+
+async def _get_cloudflare_page_data(
+    page: Page,
+    *,
+    min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
+) -> CloudflareData:
+    return await page.evaluate(
+        CLOUDFLARE_DATA_SCRIPT,
+        cloudflare_data_arg(min_token_length),
+    )
+
+
+async def has_turnstile(
+    page: Page,
+    *,
+    selectors: Sequence[str] | None = None,
+    max_candidates_per_selector: int = 5,
+    include_fallback: bool = True,
+) -> bool:
+    selector_list = selectors or DEFAULT_TURNSTILE_SELECTORS
+
+    if await _has_turnstile_locators(
+        page,
+        selector_list,
+        max_candidates_per_selector,
+    ):
+        return True
+
+    if not include_fallback:
+        return False
+
+    return await _has_turnstile_fallback(page)
+
+
+async def is_turnstile_solved(
+    page: Page,
+    *,
+    min_token_length: int = DEFAULT_TOKEN_MIN_LENGTH,
+) -> bool:
+    data = await _get_cloudflare_page_data(
+        page,
+        min_token_length=min_token_length,
+    )
+
+    return any(
+        len(str(response.get("value", "")).strip()) >= min_token_length
+        for response in data["turnstile"]["responses"]
+    )
+
+
+async def get_cloudflare_data(
+    page: Page | None = None,
+    *,
+    context: BrowserContext | None = None,
+    urls: str | Sequence[str] | None = None,
+) -> CloudflareData:
+    context = context or (page.context if page else None)
+    page_data = (
+        await _get_cloudflare_page_data(page)
+        if page
+        else empty_cloudflare_page_data()
+    )
+
+    if not context:
+        cookies: list[Any] = []
+    else:
+        cookie_urls = normalize_cookie_urls(urls)
+        try:
+            cookies = (
+                await context.cookies(cookie_urls)
+                if cookie_urls is not None
+                else await context.cookies()
+            )
+        except Exception:
+            cookies = []
+
+    return build_cloudflare_data(page_data, cookies)
 
 
 async def check_turnstile(
